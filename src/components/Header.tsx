@@ -6,10 +6,13 @@ import { useTradingStore } from '@/store/tradingStore';
 
 interface HeaderProps {
   onManageBalance?: () => void;
+  onWithdrawClick?: () => void;
   isDemoMode?: boolean;
+  userBalance?: number;
+  userWallet?: string;
 }
 
-const Header: FC<HeaderProps> = ({ onManageBalance, isDemoMode = false }) => {
+const Header: FC<HeaderProps> = ({ onManageBalance, onWithdrawClick, isDemoMode = false, userBalance, userWallet }) => {
   const { stats, balance } = useTradingStore();
   const [mounted, setMounted] = useState(false);
 
@@ -26,6 +29,14 @@ const Header: FC<HeaderProps> = ({ onManageBalance, isDemoMode = false }) => {
             <div className="px-3 py-1 rounded-full bg-yellow-500/20 border border-yellow-500/40 text-yellow-300 text-xs font-bold animate-pulse">
               🎮 DEMO MODE
             </div>
+          )}
+          {userWallet && userBalance !== undefined && (
+            <button
+              onClick={onManageBalance}
+              className="px-4 py-1 rounded-full border border-green-500/40 bg-green-500/10 text-green-300 text-sm font-bold hover:bg-green-500/20 transition-all"
+            >
+              💰 ${userBalance.toFixed(2)}
+            </button>
           )}
           <div className="flex gap-3 text-xs text-white/70">
             <div className="px-3 py-1 rounded-full border border-white/10 bg-white/5">
@@ -51,6 +62,14 @@ const Header: FC<HeaderProps> = ({ onManageBalance, isDemoMode = false }) => {
               className="border border-white/20 bg-white/10 hover:bg-white/20 text-white px-4 py-2 rounded-lg text-sm font-semibold transition-colors"
             >
               Balance ${balance.toFixed(2)}
+            </button>
+          )}
+          {onWithdrawClick && userWallet && (
+            <button
+              onClick={onWithdrawClick}
+              className="border border-emerald-500/40 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 px-4 py-2 rounded-lg text-sm font-semibold transition-colors"
+            >
+              Withdraw
             </button>
           )}
           {mounted && <WalletMultiButton />}

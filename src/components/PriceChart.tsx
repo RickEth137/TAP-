@@ -579,10 +579,11 @@ const PriceChart: FC<PriceChartProps> = ({ onGridTap }) => {
         const timeSinceWin = (Date.now() - animation.timestamp) / 1000;
         const opacity = timeSinceWin > 4 ? Math.max(0, 1 - (timeSinceWin - 4) / 2) : 1;
         
-        // Floating profit text animation
-        const floatDistance = 40;
+        // Floating profit text animation - starts ABOVE the bet square
+        const floatDistance = 60;
         const floatProgress = Math.min(1, timeSinceWin / 2);
-        const floatY = animation.y - (floatProgress * floatDistance);
+        const initialOffset = -50; // Start 50px above the bet square
+        const floatY = animation.y + initialOffset - (floatProgress * floatDistance);
         const textOpacity = timeSinceWin < 2 ? 1 : Math.max(0, 1 - (timeSinceWin - 2) / 2);
         
         return (

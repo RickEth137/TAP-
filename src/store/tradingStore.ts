@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { PriceData } from '@/services/pythService';
 import { MarketConfig } from '@/config/constants';
+import UserBalanceService from '@/services/userBalanceService';
 
 export type PositionStatus = 'active' | 'won' | 'lost';
 
@@ -30,6 +31,9 @@ export interface Position {
   resolvedPrice?: number;
   gridColumn?: number; // Store the grid column index where bet was placed
   gridRow?: number; // Store the grid row index where bet was placed (locks to cell)
+  settledOnChain?: boolean; // Track if position has been closed on Drift
+  settlementTxSignature?: string; // Transaction signature of the close order
+  settlementAttempts?: number; // Track retry attempts
 }
 
 export interface Trade {
@@ -185,7 +189,7 @@ export const useTradingStore = create<TradingState>((set, get) => ({
       const updatedPositions = state.positions.map((pos) => {
         if (pos.status !== 'active') return pos;
 
-        // Check if bet has expired (LOSS condition if price never touched zone)
+        // Check if bet has expired
         const timeLeftMs = pos.expiryTime - now;
         const hasExpired = timeLeftMs <= 0;
 
@@ -197,35 +201,33 @@ export const useTradingStore = create<TradingState>((set, get) => ({
         const lowerBound = pos.zoneLowerBound ?? pos.targetPrice;
         const upperBound = pos.zoneUpperBound ?? pos.targetPrice;
 
-        // WIN IMMEDIATELY if price touches the target zone (bet square)
+        // Check if price is in the target zone
         const priceInZone =
           currentPrice >= Math.min(lowerBound, upperBound) &&
           currentPrice <= Math.max(lowerBound, upperBound);
 
-        // Debug: Log price vs zone bounds
-        if (priceInZone) {
-          console.log('[TapTrading] 🎯 Price in zone detected:', {
-            id: pos.id,
-            currentPrice: currentPrice.toFixed(4),
-            zoneLower: lowerBound.toFixed(4),
-            zoneUpper: upperBound.toFixed(4),
-            distance: Math.abs(currentPrice - pos.targetPrice).toFixed(4),
-          });
+        // Only resolve when timer expires
+        if (!hasExpired) {
+          return pos; // Still active, waiting for expiry
         }
 
+        // Timer expired - now check WIN or LOSS
         const leverage = pos.betAmount > 0 ? pos.size / pos.betAmount : 0;
         const priceChangePercent = Math.abs(currentPrice - pos.entryPrice) / pos.entryPrice;
 
-        // Instant win if price hits the zone
-        if (priceInZone) {
-          console.log('[TapTrading] INSTANT WIN - Price touched target zone!', {
-            id: pos.id,
-            currentPrice,
-            zoneLower: lowerBound,
-            zoneUpper: upperBound,
-          });
+        console.log('[TapTrading] Resolving bet', {
+          id: pos.id,
+          expiresAt: new Date(pos.expiryTime).toISOString(),
+          timeLeftMs,
+          priceInZone,
+          currentPrice,
+          zoneLower: lowerBound,
+          zoneUpper: upperBound,
+        });
 
-          changed = true;
+        changed = true;
+
+        if (priceInZone) {
           const profit = pos.betAmount * leverage * priceChangePercent;
           const totalReturn = pos.betAmount + profit;
 
@@ -234,8 +236,18 @@ export const useTradingStore = create<TradingState>((set, get) => ({
           statsUpdate.totalVolume += pos.betAmount;
           recalcWinRate(statsUpdate);
 
+          // Credit user balance
+          if (pos.userId) {
+            try {
+              UserBalanceService.recordBetResult(pos.userId, pos.id, 'win', totalReturn);
+            } catch (error) {
+              console.error('Failed to update user balance:', error);
+            }
+          }
+
           console.log('[TapTrading] Bet WON', {
             id: pos.id,
+            userId: pos.userId,
             leverage,
             profit,
             totalReturn,
@@ -250,26 +262,25 @@ export const useTradingStore = create<TradingState>((set, get) => ({
           };
         }
 
-        // Only check for LOSS if timer has expired
-        if (!hasExpired) {
-          return pos; // Still active, waiting for price to hit zone or expire
-        }
-
-        // Timer expired and price never hit zone = LOSS
-        console.log('[TapTrading] Bet EXPIRED - Time ran out', {
-          id: pos.id,
-          expiresAt: new Date(pos.expiryTime).toISOString(),
-        });
-
-        changed = true;
+        // Timer expired and price NOT in zone = LOSS
         const pnl = -pos.betAmount;
         statsUpdate.totalLosses += 1;
         statsUpdate.realizedPnL += pnl;
         statsUpdate.totalVolume += pos.betAmount;
         recalcWinRate(statsUpdate);
 
+        // Record loss (no balance change, already deducted)
+        if (pos.userId) {
+          try {
+            UserBalanceService.recordBetResult(pos.userId, pos.id, 'loss', 0);
+          } catch (error) {
+            console.error('Failed to update user balance:', error);
+          }
+        }
+
         console.log('[TapTrading] Bet LOST', {
           id: pos.id,
+          userId: pos.userId,
           pnl,
         });
 
