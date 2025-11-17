@@ -3,6 +3,8 @@
 import { FC, useEffect, useRef, useState } from 'react';
 import { useTradingStore } from '@/store/tradingStore';
 import { calculateLeverage, computeRecentVolatility } from '@/utils/probability';
+import Lottie from 'lottie-react';
+import coinBustAnimation from '@/../../public/coin-bust.json';
 
 const MIN_SECONDS_AHEAD = 5; // Drift can't realistically settle sub-5s trades
 const MAX_SECONDS_AHEAD = 60;
@@ -28,6 +30,13 @@ const PriceChart: FC<PriceChartProps> = ({ onGridTap }) => {
   const lastBaselineUpdateRef = useRef(0);
   const smoothedPriceRef = useRef(0); // Interpolated price for smooth animation
   const targetPriceRef = useRef(0); // Actual target price from data
+  const [wonBetAnimations, setWonBetAnimations] = useState<Array<{
+    id: string;
+    x: number;
+    y: number;
+    profit: number;
+    timestamp: number;
+  }>>([]);
 
   useEffect(() => {
     if (!canvasRef.current) return;
@@ -399,135 +408,43 @@ const PriceChart: FC<PriceChartProps> = ({ onGridTap }) => {
       ctx.stroke();
       ctx.setLineDash([]);
 
-      // Helper function to draw a star
-      const drawStar = (
-        ctx: CanvasRenderingContext2D,
-        cx: number,
-        cy: number,
-        outerRadius: number,
-        innerRadius: number,
-        points: number = 5
-      ) => {
-        ctx.beginPath();
-        for (let i = 0; i < points * 2; i++) {
-          const radius = i % 2 === 0 ? outerRadius : innerRadius;
-          const angle = (Math.PI / points) * i - Math.PI / 2;
-          const x = cx + Math.cos(angle) * radius;
-          const y = cy + Math.sin(angle) * radius;
-          if (i === 0) {
-            ctx.moveTo(x, y);
-          } else {
-            ctx.lineTo(x, y);
-          }
-        }
-        ctx.closePath();
+      // Helper function to convert price to Y coordinate (needed for won bet positioning)
+      const priceToYForOverlay = (price: number) => {
+        const priceOffset = price - viewportCenterPrice;
+        const pixelOffset = -(priceOffset / pricePerPixel);
+        return rect.height / 2 + pixelOffset;
       };
 
-      // Draw WON bets as enhanced golden stars with floating profit text
+      // Update won bet positions for overlay rendering
       const wonBets = positions.filter(p => p.status === 'won');
-      
-      wonBets.forEach((bet) => {
-        // Calculate time since win for animation
+      const newAnimations = wonBets.map(bet => {
         const timeSinceWin = bet.resolvedAt ? (now - bet.resolvedAt) / 1000 : 0;
-        
-        // Fade out after 6 seconds
-        if (timeSinceWin > 6) return;
+        if (timeSinceWin > 6) return null;
 
-        // Use STORED grid column (same fix as active bets)
         const betColIndex = bet.gridColumn ?? 0;
-        if (!bet.gridColumn) {
-          console.warn('[STAR RENDER] Missing gridColumn for won bet', bet.id);
-          return;
-        }
+        if (!bet.gridColumn) return null;
         
         const columnStartX = betColIndex * gridCellWidth - scrollPosition;
         const cellCenterX = columnStartX + gridCellWidth / 2;
         
-        // Show star even if scrolled past NOW line (keep visible for a bit)
-        if (cellCenterX > rect.width) return;
+        if (cellCenterX > rect.width) return null;
 
-        // Calculate Y position from target price
-        const starY = priceToY(bet.targetPrice);
-        if (starY < 0 || starY > rect.height) return;
+        const starY = priceToYForOverlay(bet.targetPrice);
+        if (starY < 0 || starY > rect.height) return null;
 
-        // ENHANCED: Multiple pulsing waves
-        const pulseProgress = Math.min(1, timeSinceWin * 1.2);
-        const pulse1 = Math.sin(pulseProgress * Math.PI * 6) * 0.3 * (1 - pulseProgress);
-        const pulse2 = Math.sin(pulseProgress * Math.PI * 3) * 0.15 * (1 - pulseProgress);
-        const scale = 1 + pulse1 + pulse2;
-        const starSize = 35 * scale;
-        
-        // Fade out in last 2 seconds
-        const opacity = timeSinceWin > 4 ? Math.max(0, 1 - (timeSinceWin - 4) / 2) : 1;
+        return {
+          id: bet.id,
+          x: cellCenterX,
+          y: starY,
+          profit: bet.realizedPnL || 0,
+          timestamp: bet.resolvedAt || now
+        };
+      }).filter(Boolean) as Array<{id: string; x: number; y: number; profit: number; timestamp: number}>;
 
-        ctx.save();
-        ctx.globalAlpha = opacity;
-        
-        // ENHANCED: Multiple glow layers
-        // Outer glow (largest)
-        ctx.shadowBlur = 50;
-        ctx.shadowColor = 'rgba(255, 215, 0, 0.6)';
-        ctx.fillStyle = '#FFD700';
-        drawStar(ctx, cellCenterX, starY, starSize, starSize * 0.4);
-        ctx.fill();
-        
-        // Middle glow
-        ctx.shadowBlur = 25;
-        ctx.shadowColor = 'rgba(255, 235, 59, 0.9)';
-        ctx.fillStyle = '#FFEB3B';
-        drawStar(ctx, cellCenterX, starY, starSize * 0.75, starSize * 0.3);
-        ctx.fill();
-        
-        // Inner bright core
-        ctx.shadowBlur = 10;
-        ctx.shadowColor = 'rgba(255, 255, 255, 1)';
-        ctx.fillStyle = '#FFFACD';
-        drawStar(ctx, cellCenterX, starY, starSize * 0.5, starSize * 0.2);
-        ctx.fill();
-
-        // FLOATING PROFIT TEXT ANIMATION
-        const profit = bet.realizedPnL || 0;
-        const floatDistance = 40; // pixels to float upward
-        const floatProgress = Math.min(1, timeSinceWin / 2); // Float for 2 seconds
-        const floatY = starY - (floatProgress * floatDistance);
-        const textOpacity = timeSinceWin < 2 ? 1 : Math.max(0, 1 - (timeSinceWin - 2) / 2);
-        
-        ctx.globalAlpha = textOpacity * opacity;
-        ctx.shadowBlur = 8;
-        ctx.shadowColor = 'rgba(0, 0, 0, 0.8)';
-        
-        // Profit text background
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-        const profitText = `+$${profit.toFixed(2)}`;
-        ctx.font = 'bold 18px monospace';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        const textMetrics = ctx.measureText(profitText);
-        const padding = 8;
-        ctx.fillRect(
-          cellCenterX - textMetrics.width / 2 - padding,
-          floatY - 12,
-          textMetrics.width + padding * 2,
-          24
-        );
-        
-        // Profit text with green gradient
-        const textGradient = ctx.createLinearGradient(
-          cellCenterX,
-          floatY - 10,
-          cellCenterX,
-          floatY + 10
-        );
-        textGradient.addColorStop(0, '#4ade80');
-        textGradient.addColorStop(1, '#22c55e');
-        ctx.fillStyle = textGradient;
-        ctx.strokeStyle = '#000';
-        ctx.lineWidth = 3;
-        ctx.strokeText(profitText, cellCenterX, floatY);
-        ctx.fillText(profitText, cellCenterX, floatY);
-        
-        ctx.restore();
-      });
+      // Update state if animations changed
+      if (JSON.stringify(newAnimations.map(a => a.id)) !== JSON.stringify(wonBetAnimations.map(a => a.id))) {
+        setWonBetAnimations(newAnimations);
+      }
 
       // Continue animation
       animationFrameId = requestAnimationFrame(render);
@@ -656,6 +573,58 @@ const PriceChart: FC<PriceChartProps> = ({ onGridTap }) => {
         className="w-full h-full"
         style={{ width: '100%', height: '100%' }}
       />
+      
+      {/* Lottie coin burst animations for won bets */}
+      {wonBetAnimations.map((animation) => {
+        const timeSinceWin = (Date.now() - animation.timestamp) / 1000;
+        const opacity = timeSinceWin > 4 ? Math.max(0, 1 - (timeSinceWin - 4) / 2) : 1;
+        
+        // Floating profit text animation
+        const floatDistance = 40;
+        const floatProgress = Math.min(1, timeSinceWin / 2);
+        const floatY = animation.y - (floatProgress * floatDistance);
+        const textOpacity = timeSinceWin < 2 ? 1 : Math.max(0, 1 - (timeSinceWin - 2) / 2);
+        
+        return (
+          <div key={animation.id}>
+            {/* Coin bust animation - centered on the bet square */}
+            <div
+              className="absolute pointer-events-none"
+              style={{
+                left: animation.x,
+                top: animation.y,
+                width: 150,
+                height: 150,
+                transform: 'translate(-50%, -50%)',
+                opacity: opacity,
+              }}
+            >
+              <Lottie
+                animationData={coinBustAnimation}
+                loop={false}
+                style={{ width: '100%', height: '100%' }}
+              />
+            </div>
+            
+            {/* Floating profit text */}
+            <div
+              className="absolute pointer-events-none z-10"
+              style={{
+                left: animation.x,
+                top: floatY,
+                opacity: textOpacity * opacity,
+                transform: 'translate(-50%, -50%)'
+              }}
+            >
+              <div className="bg-black/70 backdrop-blur-sm px-3 py-1 rounded-lg border border-green-500/50 shadow-lg">
+                <div className="text-lg font-bold bg-gradient-to-b from-green-400 to-green-600 bg-clip-text text-transparent">
+                  +${animation.profit.toFixed(2)}
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })}
       
       {/* Current Price Label */}
       {currentPrice > 0 && (

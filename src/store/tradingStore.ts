@@ -185,8 +185,9 @@ export const useTradingStore = create<TradingState>((set, get) => ({
       const updatedPositions = state.positions.map((pos) => {
         if (pos.status !== 'active') return pos;
 
+        // Check if bet has expired (LOSS condition if price never touched zone)
         const timeLeftMs = pos.expiryTime - now;
-        if (timeLeftMs > 0) return pos;
+        const hasExpired = timeLeftMs <= 0;
 
         if (!pos.entryPrice || pos.entryPrice <= 0) {
           console.warn('[TapTrading] Position missing entry price, skipping resolve', pos.id);
@@ -196,26 +197,35 @@ export const useTradingStore = create<TradingState>((set, get) => ({
         const lowerBound = pos.zoneLowerBound ?? pos.targetPrice;
         const upperBound = pos.zoneUpperBound ?? pos.targetPrice;
 
+        // WIN IMMEDIATELY if price touches the target zone (bet square)
         const priceInZone =
           currentPrice >= Math.min(lowerBound, upperBound) &&
           currentPrice <= Math.max(lowerBound, upperBound);
 
+        // Debug: Log price vs zone bounds
+        if (priceInZone) {
+          console.log('[TapTrading] 🎯 Price in zone detected:', {
+            id: pos.id,
+            currentPrice: currentPrice.toFixed(4),
+            zoneLower: lowerBound.toFixed(4),
+            zoneUpper: upperBound.toFixed(4),
+            distance: Math.abs(currentPrice - pos.targetPrice).toFixed(4),
+          });
+        }
+
         const leverage = pos.betAmount > 0 ? pos.size / pos.betAmount : 0;
         const priceChangePercent = Math.abs(currentPrice - pos.entryPrice) / pos.entryPrice;
 
-        console.log('[TapTrading] Resolving bet', {
-          id: pos.id,
-          expiresAt: new Date(pos.expiryTime).toISOString(),
-          timeLeftMs,
-          priceInZone,
-          currentPrice,
-          zoneLower: lowerBound,
-          zoneUpper: upperBound,
-        });
-
-        changed = true;
-
+        // Instant win if price hits the zone
         if (priceInZone) {
+          console.log('[TapTrading] INSTANT WIN - Price touched target zone!', {
+            id: pos.id,
+            currentPrice,
+            zoneLower: lowerBound,
+            zoneUpper: upperBound,
+          });
+
+          changed = true;
           const profit = pos.betAmount * leverage * priceChangePercent;
           const totalReturn = pos.betAmount + profit;
 
@@ -240,6 +250,18 @@ export const useTradingStore = create<TradingState>((set, get) => ({
           };
         }
 
+        // Only check for LOSS if timer has expired
+        if (!hasExpired) {
+          return pos; // Still active, waiting for price to hit zone or expire
+        }
+
+        // Timer expired and price never hit zone = LOSS
+        console.log('[TapTrading] Bet EXPIRED - Time ran out', {
+          id: pos.id,
+          expiresAt: new Date(pos.expiryTime).toISOString(),
+        });
+
+        changed = true;
         const pnl = -pos.betAmount;
         statsUpdate.totalLosses += 1;
         statsUpdate.realizedPnL += pnl;

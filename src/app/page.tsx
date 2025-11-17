@@ -352,7 +352,11 @@ export default function Home() {
       }
       const createdAt = Date.now();
       const positionId = `bet-${createdAt}`;
-      const zoneHalfWidth = currentPrice * 0.001;
+      
+      // Zone should match the VISUAL grid cell height (0.2% per row, 10 rows = 2% total range)
+      // Each grid cell = 0.2% of price range
+      const gridCellPercent = 0.002; // 0.2% per grid cell
+      const zoneHalfWidth = targetPrice * (gridCellPercent / 2); // Half cell height
       const zoneLowerBound = targetPrice - zoneHalfWidth;
       const zoneUpperBound = targetPrice + zoneHalfWidth;
       
@@ -368,14 +372,15 @@ export default function Home() {
        Position Size: $${positionSize.toFixed(2)}
    
        Current Price: $${currentPrice.toFixed(2)}
-      Predicted Zone: $${zoneLowerBound.toFixed(2)} - $${zoneUpperBound.toFixed(2)} (±0.2%)
+      Target Price: $${targetPrice.toFixed(2)}
+      Win Zone: $${zoneLowerBound.toFixed(2)} - $${zoneUpperBound.toFixed(2)} (±${(gridCellPercent * 50).toFixed(1)}%)
        Time Limit: +${expirySeconds.toFixed(0)}s
    
        Expected Profit if Correct: $${expectedProfit.toFixed(2)}
        Total if WIN: $${(betAmount + expectedProfit).toFixed(2)}
    
-       WIN if: Price lands in zone when timer expires
-       LOSS if: Price outside zone when timer expires (-$${betAmount} collateral)
+       WIN if: Price line crosses through bet square
+       LOSS if: Timer expires before price hits square (-$${betAmount} collateral)
     `);
 
       setExecutingTrade(true);
@@ -471,7 +476,7 @@ export default function Home() {
       />
 
       {/* Main content strip */}
-      <div className="absolute inset-x-0 top-16 bottom-20 flex gap-6 px-6">
+      <div className="absolute inset-x-0 top-16 bottom-0 flex gap-6 px-6 pb-6">
         <div className="flex-1 relative rounded-3xl border border-white/10 bg-black/60 backdrop-blur-xl overflow-hidden shadow-[0_20px_60px_rgba(0,0,0,0.65)]">
           <PriceChart onGridTap={handleGridTap} />
         </div>
