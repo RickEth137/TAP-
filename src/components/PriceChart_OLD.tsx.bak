@@ -1,0 +1,448 @@
+'use client';
+
+import { FC, useEffect, useRef } from 'react';
+import { useTradingStore } from '@/store/tradingStore';
+import { calculateMultiplier, computeRecentVolatility } from '@/utils/probability';
+
+interface PriceChartProps {
+  onGridTap?: (
+    targetPrice: number,
+    expiryTime: number,
+    multiplier: number,
+    timeAheadSeconds: number
+  ) => void;
+}
+
+const PriceChart: FC<PriceChartProps> = ({ onGridTap }) => {
+  const { priceHistory, currentPrice, positions } = useTradingStore();
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const scrollPositionRef = useRef(0);
+  const lastTimeRef = useRef(Date.now());
+  const anchorPriceRef = useRef(0);
+  const baselinePriceRef = useRef(0); // STABLE baseline for Y-axis
+  const lastBaselineUpdateRef = useRef(0);
+
+  useEffect(() => {
+    if (!canvasRef.current) return;
+
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    let animationFrameId: number;
+
+    const render = () => {
+      // Set canvas size
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      ctx.scale(dpr, dpr);
+
+      // Clear canvas
+      ctx.clearRect(0, 0, rect.width, rect.height);
+
+      const gridCellWidth = 80; // Width of each grid cell
+      const gridCellHeight = rect.height / 10; // 10 rows
+      const percentRange = 0.005; // ±0.5%
+      const percentStep = (percentRange * 2) / 10; // 0.1% per grid line
+
+      // ============== SCROLLING LOGIC ==============
+      const now = Date.now();
+      const deltaTime = (now - lastTimeRef.current) / 1000; // seconds
+      lastTimeRef.current = now;
+
+      const presentX = rect.width * 0.25; // NOW line position
+      const futureWidth = rect.width - presentX;
+      const maxTimeAhead = 60; // seconds visible on grid
+      const scrollSpeed = futureWidth / maxTimeAhead; // pixels per second
+
+      // Update scroll position (world moves right-to-left)
+      scrollPositionRef.current += scrollSpeed * deltaTime;
+      const scrollPosition = scrollPositionRef.current;
+      const gridOffset = scrollPosition % gridCellWidth; // For drawing grid lines
+
+      // ============== DRAW SCROLLING GRID ==============
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+      ctx.lineWidth = 1;
+      
+      // Vertical lines (scrolling)
+      const numVerticalLines = Math.ceil(rect.width / gridCellWidth) + 2;
+      for (let i = 0; i < numVerticalLines; i++) {
+        const x = i * gridCellWidth - gridOffset;
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, rect.height);
+        ctx.stroke();
+      }
+
+      // Horizontal lines (static) with percentage labels
+      ctx.font = '11px monospace';
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+      ctx.textAlign = 'right';
+      for (let i = 0; i <= 10; i++) {
+        const y = i * gridCellHeight;
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(rect.width, y);
+        ctx.stroke();
+        
+        const percentValue = percentRange - i * percentStep;
+        const percentLabel = (percentValue * 100).toFixed(1);
+        ctx.fillText(`${percentValue > 0 ? '+' : ''}${percentLabel}%`, rect.width - 5, y - 3);
+      }
+
+      if (priceHistory.length < 2 || !currentPrice) {
+        animationFrameId = requestAnimationFrame(render);
+        return;
+      }
+
+      // ** STABLE BASELINE SYSTEM **
+      // Initialize baseline price - this is the FIXED center of our Y-axis
+      if (baselinePriceRef.current === 0 && currentPrice > 0) {
+        baselinePriceRef.current = currentPrice;
+        lastBaselineUpdateRef.current = Date.now();
+      }
+      
+      // Only recenter the baseline if price drifts too far (beyond 80% of range)
+      // OR if enough time has passed (10 seconds)
+      if (currentPrice > 0 && baselinePriceRef.current > 0) {
+        const percentDrift = Math.abs(currentPrice - baselinePriceRef.current) / baselinePriceRef.current;
+        const timeSinceUpdate = Date.now() - lastBaselineUpdateRef.current;
+        
+        if (percentDrift > 0.004 || timeSinceUpdate > 10000) {
+          // Smoothly shift baseline
+          baselinePriceRef.current += (currentPrice - baselinePriceRef.current) * 0.3;
+          lastBaselineUpdateRef.current = Date.now();
+        }
+      }
+      
+      const baselinePrice = baselinePriceRef.current;
+
+      // ** Smooth anchor for multiplier calculations only **
+      if (anchorPriceRef.current === 0 && currentPrice > 0) {
+        anchorPriceRef.current = currentPrice;
+      } else if (currentPrice > 0 && anchorPriceRef.current > 0) {
+        const smoothingFactor = 0.02;
+        anchorPriceRef.current += (currentPrice - anchorPriceRef.current) * smoothingFactor;
+      }
+
+      const centerPrice = anchorPriceRef.current || currentPrice;
+      if (!centerPrice || centerPrice <= 0 || !baselinePrice) {
+        animationFrameId = requestAnimationFrame(render);
+        return;
+      }
+
+      // ** Price to Y-coordinate using STABLE baseline **
+      const priceToY = (price: number) => {
+        const percentFromBaseline = (price - baselinePrice) / baselinePrice;
+        const relativeY = percentFromBaseline / (percentRange * 2);
+        return rect.height * (0.5 - relativeY);
+      };
+      
+      const currentY = priceToY(currentPrice);
+
+      // ============== FIXED PRICE LINE POSITION (25% from left) ==============
+
+      // Draw "NOW" line
+      ctx.strokeStyle = 'rgba(139, 92, 246, 0.8)';
+      ctx.lineWidth = 3;
+      ctx.setLineDash([8, 4]);
+      ctx.beginPath();
+      ctx.moveTo(presentX, 0);
+      ctx.lineTo(presentX, rect.height);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // NOW label
+      ctx.fillStyle = 'rgba(139, 92, 246, 1)';
+      ctx.font = 'bold 14px monospace';
+      ctx.fillText('NOW', presentX + 8, 25);
+
+      // ============== DRAW SCROLLING MULTIPLIERS (Future Zone) ==============
+      const futureStartX = presentX;
+      const columnsInView = Math.ceil(futureWidth / gridCellWidth) + 1;
+      const pixelsPerSecond = futureWidth / maxTimeAhead;
+      const fadeWindow = 0.5; // seconds before NOW to fade out
+
+      ctx.font = 'bold 16px monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+
+      const recentPrices = priceHistory.slice(-120).map(d => d.price);
+      const recentVolatility = computeRecentVolatility(recentPrices);
+
+      const startColumn = Math.floor(scrollPosition / gridCellWidth);
+
+      for (let i = 0; i < columnsInView; i++) {
+        const colIndex = startColumn + i;
+        const centerX = (colIndex + 0.5) * gridCellWidth - scrollPosition + presentX;
+
+        if (centerX < presentX || centerX > rect.width) continue;
+
+        const secondsAhead = (centerX - presentX) / pixelsPerSecond;
+        if (secondsAhead <= 0) continue;
+
+        const opacity = secondsAhead < fadeWindow
+          ? Math.max(0, Math.min(1, secondsAhead / fadeWindow))
+          : 1;
+
+        for (let row = 0; row < 10; row++) {
+          const percentOffset = percentRange - (row * percentStep) - (percentStep / 2);
+          const targetPrice = centerPrice * (1 + percentOffset);
+          const y = (row + 0.5) * gridCellHeight;
+          const multiplier = calculateMultiplier(currentPrice, targetPrice, secondsAhead, recentVolatility);
+
+          ctx.save();
+          ctx.globalAlpha = opacity;
+          ctx.fillStyle = multiplier > 15 ? 'rgba(251, 191, 36, 0.95)' : 'rgba(168, 85, 247, 0.92)';
+          ctx.shadowBlur = 18;
+          ctx.shadowColor = multiplier > 15 ? '#fbbf24' : '#a855f7';
+          ctx.fillText(`${multiplier.toFixed(1)}x`, centerX, y);
+          ctx.shadowBlur = 0;
+
+          if (multiplier > 25) {
+            ctx.fillStyle = 'rgba(251, 191, 36, 0.18)';
+            ctx.beginPath();
+            ctx.arc(centerX, y, 26, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          ctx.restore();
+        }
+      }
+
+      // Draw animated time labels
+      ctx.font = 'bold 12px monospace';
+      ctx.fillStyle = 'rgba(168, 85, 247, 0.8)';
+      const timeLabels = [10, 20, 30, 40, 50, 60];
+      timeLabels.forEach((seconds: number) => {
+        const x = presentX + (seconds / maxTimeAhead) * futureWidth;
+        if (x > presentX && x < rect.width) {
+          ctx.fillText(`+${seconds}s`, x, 15);
+        }
+      });
+
+      // ============== DRAW SMOOTH PRICE LINE ==============
+      
+      if (priceHistory.length > 1) {
+        const gradient = ctx.createLinearGradient(0, 0, presentX, 0);
+        gradient.addColorStop(0, 'rgba(168, 85, 247, 0.4)');
+        gradient.addColorStop(0.7, 'rgba(236, 72, 153, 0.7)');
+        gradient.addColorStop(1, '#ec4899');
+        
+        ctx.strokeStyle = gradient;
+        ctx.lineWidth = 3;
+        ctx.shadowBlur = 12;
+        ctx.shadowColor = 'rgba(236, 72, 153, 0.5)';
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+
+        // Take enough history to fill the past zone smoothly
+        const pointsToShow = Math.min(priceHistory.length, 200);
+        const historyToShow = priceHistory.slice(-pointsToShow);
+        const xStep = presentX / pointsToShow;
+        
+        // Start from oldest point
+        const firstY = priceToY(historyToShow[0].price);
+        ctx.moveTo(0, firstY);
+        
+        // Draw smooth bezier curves through all points
+        for (let i = 1; i < historyToShow.length; i++) {
+          const x = i * xStep;
+          const y = priceToY(historyToShow[i].price);
+          
+          // Get previous point
+          const prevX = (i - 1) * xStep;
+          const prevY = priceToY(historyToShow[i - 1].price);
+          
+          // Control point for smooth curve
+          const cpX = (prevX + x) / 2;
+          const cpY = (prevY + y) / 2;
+          
+          ctx.quadraticCurveTo(prevX, prevY, cpX, cpY);
+        }
+        
+        // Connect last history point to current price at NOW line
+        const lastIdx = historyToShow.length - 1;
+        const lastX = lastIdx * xStep;
+        const lastY = priceToY(historyToShow[lastIdx].price);
+        
+        ctx.quadraticCurveTo(lastX, lastY, (lastX + presentX) / 2, (lastY + currentY) / 2);
+        ctx.lineTo(presentX, currentY);
+        
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+      }
+
+      // Draw current price HEAD (pulsing dot at NOW line)
+      ctx.fillStyle = '#ec4899';
+      ctx.shadowBlur = 20;
+      ctx.shadowColor = '#ec4899';
+      ctx.beginPath();
+      ctx.arc(presentX, currentY, 8, 0, Math.PI * 2);
+      ctx.fill();
+      
+      // Inner glow
+      ctx.fillStyle = '#ffffff';
+      ctx.shadowBlur = 0;
+      ctx.beginPath();
+      ctx.arc(presentX, currentY, 4, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Draw price label next to the head
+      ctx.fillStyle = '#ec4899';
+      ctx.font = 'bold 14px monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(`$${currentPrice.toFixed(2)}`, presentX + 15, currentY);
+
+      // Draw horizontal line showing current price level across past zone
+      ctx.strokeStyle = 'rgba(236, 72, 153, 0.2)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(0, currentY);
+      ctx.lineTo(presentX, currentY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // FIX 3: Draw active bets as YELLOW SQUARES on the grid
+      const activeBets = positions.filter(p => p.status === 'active');
+      const stackMap = new Map<string, number>();
+
+      activeBets.forEach((bet) => {
+        const timeRemaining = Math.max(0, (bet.expiryTime - Date.now()) / 1000);
+        if (timeRemaining <= 0) return;
+
+        // Calculate which grid cell this bet is in - using discrete grid cells
+        const secondsAhead = timeRemaining;
+        const colIndex = Math.floor((secondsAhead * pixelsPerSecond + scrollPosition) / gridCellWidth);
+        const cellCenterX = (colIndex + 0.5) * gridCellWidth - scrollPosition + presentX;
+
+        if (cellCenterX <= presentX || cellCenterX >= rect.width) return;
+
+        // Calculate bet Y using the relative scale (for multipliers/grid)
+        const percentFromCenter = (bet.targetPrice - centerPrice) / centerPrice;
+        const relativeY = percentFromCenter / (percentRange * 2);
+        const betY = rect.height * (0.5 - relativeY);
+        if (betY < 0 || betY > rect.height) return;
+
+        const opacity = timeRemaining < fadeWindow
+          ? Math.max(0.2, Math.min(1, timeRemaining / fadeWindow))
+          : 1;
+
+        const stackKey = `${Math.round(bet.targetPrice * 100)}-${Math.round(cellCenterX)}`;
+        const stackIndex = stackMap.get(stackKey) ?? 0;
+        stackMap.set(stackKey, stackIndex + 1);
+        const yOffset = stackIndex * 12;
+
+        const boxSize = 40;
+        ctx.save();
+        ctx.globalAlpha = opacity;
+        ctx.fillStyle = 'rgba(251, 191, 36, 0.95)';
+        ctx.shadowBlur = 25;
+        ctx.shadowColor = '#fbbf24';
+        ctx.fillRect(cellCenterX - boxSize / 2, betY - boxSize / 2 - yOffset, boxSize, boxSize);
+
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = '#000';
+        ctx.font = 'bold 14px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(`$${bet.betAmount}`, cellCenterX, betY - 6 - yOffset);
+        ctx.font = '11px monospace';
+        ctx.fillText(`${bet.multiplier.toFixed(1)}x`, cellCenterX, betY + 7 - yOffset);
+        ctx.restore();
+      });
+
+      // Continue animation
+      animationFrameId = requestAnimationFrame(render);
+    };
+
+    // Start animation loop
+    animationFrameId = requestAnimationFrame(render);
+
+    return () => {
+      cancelAnimationFrame(animationFrameId);
+    };
+  }, [priceHistory, currentPrice, positions]);
+
+  // Handle taps directly on the canvas so coordinates align with rendering math
+  useEffect(() => {
+    if (!onGridTap || !canvasRef.current) return;
+
+    const canvas = canvasRef.current;
+
+    const handleClick = (event: MouseEvent) => {
+      if (!currentPrice || currentPrice <= 0) return;
+
+      const rect = canvas.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+
+      const presentX = rect.width * 0.25;
+      const futureWidth = rect.width - presentX;
+      const gridCellWidth = 80;
+      const gridCellHeight = rect.height / 10;
+      const percentRange = 0.005;
+      const percentStep = (percentRange * 2) / 10;
+      const maxTimeAhead = 60;
+      const pixelsPerSecond = futureWidth / maxTimeAhead;
+
+      if (x <= presentX) return;
+
+      const rowIndex = Math.floor(y / gridCellHeight);
+      if (rowIndex < 0 || rowIndex >= 10) return;
+
+      const percentOffset = percentRange - (rowIndex * percentStep) - (percentStep / 2);
+      const centerPrice = anchorPriceRef.current || currentPrice;
+      if (!centerPrice) return;
+      const targetPrice = centerPrice * (1 + percentOffset);
+
+      // Calculate which grid cell column was clicked
+      const scrollPosition = scrollPositionRef.current;
+      const gridOffset = scrollPosition % gridCellWidth;
+      const clickedColIndex = Math.floor((x - presentX + gridOffset) / gridCellWidth);
+      const cellCenterX = (clickedColIndex + 0.5) * gridCellWidth - gridOffset + presentX;
+      
+      const secondsAhead = Math.max(1, Math.min(maxTimeAhead, (cellCenterX - presentX) / pixelsPerSecond));
+      const expiryTime = Date.now() + secondsAhead * 1000;
+
+      const recentPrices = priceHistory.slice(-120).map(d => d.price);
+      if (!recentPrices.length) return;
+      const recentVolatility = computeRecentVolatility(recentPrices);
+      const multiplier = calculateMultiplier(currentPrice, targetPrice, secondsAhead, recentVolatility);
+
+      onGridTap(targetPrice, expiryTime, multiplier, secondsAhead);
+    };
+
+    canvas.addEventListener('click', handleClick);
+    return () => {
+      canvas.removeEventListener('click', handleClick);
+    };
+  }, [onGridTap, currentPrice, priceHistory]);
+
+  return (
+    <div className="relative w-full h-full">
+      <canvas
+        ref={canvasRef}
+        className="w-full h-full"
+        style={{ width: '100%', height: '100%' }}
+      />
+      
+      {/* Current Price Label */}
+      {currentPrice > 0 && (
+        <div className="absolute top-4 left-4 bg-black/80 backdrop-blur-md px-4 py-2 rounded-xl border border-purple-500/50 shadow-xl">
+          <div className="text-[10px] text-gray-400 uppercase tracking-wider">SOL/USDT (Live)</div>
+          <div className="text-3xl font-bold text-white mt-1">
+            ${currentPrice.toFixed(2)}
+          </div>
+          <div className="text-[10px] text-green-400 mt-1">● Binance WebSocket</div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default PriceChart;
