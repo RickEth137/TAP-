@@ -69,55 +69,93 @@ export class DriftService {
    * This single account handles ALL user trades
    */
   async initializeClient(): Promise<void> {
+    console.log('🔧 [DriftService] Starting initialization...');
+    
     try {
+      let wallet: Wallet;
+
       // Load universal account from environment
-      if (!DRIFT_CONFIG.UNIVERSAL_ACCOUNT_PRIVATE_KEY) {
-        console.warn('⚠️  DRIFT_UNIVERSAL_ACCOUNT_PRIVATE_KEY not configured!');
-        console.warn('📝 To enable live trading, add this to your .env.local file:');
-        console.warn('   DRIFT_UNIVERSAL_ACCOUNT_PRIVATE_KEY=[1,2,3,...]');
-        console.warn('📖 See UNIVERSAL_ACCOUNT_SETUP.md for setup instructions');
-        console.warn('🎮 Running in DEMO MODE - no real trades will be placed');
-        throw new Error('Universal account not configured - demo mode only');
+      if (DRIFT_CONFIG.UNIVERSAL_ACCOUNT_PRIVATE_KEY) {
+        console.log('✅ Private key found - Full Access Mode');
+        // Parse the private key (supports JSON array format)
+        try {
+          const privateKeyArray = JSON.parse(DRIFT_CONFIG.UNIVERSAL_ACCOUNT_PRIVATE_KEY);
+          const keypair = Keypair.fromSecretKey(Uint8Array.from(privateKeyArray));
+          wallet = new UniversalWallet(keypair);
+        } catch (error) {
+          console.error('❌ Invalid DRIFT_UNIVERSAL_ACCOUNT_PRIVATE_KEY format');
+          throw new Error('Invalid DRIFT_UNIVERSAL_ACCOUNT_PRIVATE_KEY format');
+        }
+      } else {
+        console.log('⚠️ No private key found - Read-Only Mode');
+        const pubKeyStr = process.env.NEXT_PUBLIC_UNIVERSAL_WALLET_ADDRESS;
+        if (!pubKeyStr) {
+             throw new Error('Read-only mode requires NEXT_PUBLIC_UNIVERSAL_WALLET_ADDRESS');
+        }
+        const publicKey = new PublicKey(pubKeyStr);
+        
+        // Create a dummy wallet that throws on sign
+        wallet = {
+            publicKey,
+            signTransaction: async () => { throw new Error('Read-only mode'); },
+            signAllTransactions: async () => { throw new Error('Read-only mode'); },
+            signVersionedTransaction: async () => { throw new Error('Read-only mode'); },
+            signAllVersionedTransactions: async () => { throw new Error('Read-only mode'); },
+            payer: undefined as any
+        };
       }
 
-      // Parse the private key (supports JSON array format)
-      let keypair: Keypair;
-      try {
-        // Expect JSON array format [1,2,3,...]
-        const privateKeyArray = JSON.parse(DRIFT_CONFIG.UNIVERSAL_ACCOUNT_PRIVATE_KEY);
-        keypair = Keypair.fromSecretKey(Uint8Array.from(privateKeyArray));
-      } catch (error) {
-        console.error('❌ Invalid DRIFT_UNIVERSAL_ACCOUNT_PRIVATE_KEY format');
-        console.error('Expected: JSON array like [1,2,3,...]');
-        console.error('See UNIVERSAL_ACCOUNT_SETUP.md for details');
-        throw new Error('Invalid DRIFT_UNIVERSAL_ACCOUNT_PRIVATE_KEY format. Must be JSON array like [1,2,3,...]');
-      }
+      console.log('🌐 Creating connection to RPC:', this.connection.rpcEndpoint);
+      
+      this.universalWallet = wallet as any;
+      console.log('✅ Universal wallet created');
 
-      this.universalWallet = new UniversalWallet(keypair);
-
+      console.log('📦 Creating BulkAccountLoader...');
       this.bulkAccountLoader = new BulkAccountLoader(
         this.connection,
         'confirmed',
         1000
       );
 
+      console.log('🎯 Creating DriftClient...');
       this.driftClient = new DriftClient({
         connection: this.connection,
-        wallet: this.universalWallet,
+        wallet: this.universalWallet!,
         programID: new PublicKey(DRIFT_CONFIG.DRIFT_PROGRAM_ID),
         accountSubscription: {
           type: 'polling',
           accountLoader: this.bulkAccountLoader,
         },
       });
+      console.log('✅ DriftClient instance created');
 
+      console.log('📡 Subscribing to Drift Protocol...');
       await this.driftClient.subscribe();
+      console.log('✅ Successfully subscribed to Drift Protocol');
       
       console.log('✅ Universal Drift Account initialized');
-      console.log('📍 Public Key:', this.universalWallet.publicKey.toBase58());
-      console.log('⚠️  ALL users share this account - positions tracked separately in app state');
-    } catch (error) {
-      console.error('❌ Failed to initialize Universal Drift Account:', error);
+      console.log('📍 Public Key:', this.universalWallet!.publicKey.toBase58());
+      
+    } catch (error: any) {
+      console.error('❌ Failed to initialize Universal Drift Account');
+      console.error('Error type:', error?.constructor?.name);
+      console.error('Error message:', error?.message);
+      console.error('Full error:', error);
+      
+      if (error?.message?.includes('Account does not exist') || error?.message?.includes('account not found')) {
+        console.error('');
+        console.error('🚨 DRIFT ACCOUNT NOT INITIALIZED 🚨');
+        console.error('Your wallet needs to be initialized on Drift Protocol first!');
+        console.error('');
+        console.error('📝 FIX:');
+        console.error('1. Visit: https://app.drift.trade/');
+        console.error('2. Import your universal wallet private key');
+        console.error('3. Click "Initialize Account" (~0.035 SOL)');
+        console.error('4. Wait for confirmation');
+        console.error('5. Refresh this page');
+        console.error('');
+      }
+      
       throw error;
     }
   }

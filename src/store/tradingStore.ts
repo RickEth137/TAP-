@@ -1,7 +1,6 @@
 import { create } from 'zustand';
 import { PriceData } from '@/services/pythService';
 import { MarketConfig } from '@/config/constants';
-import UserBalanceService from '@/services/userBalanceService';
 
 export type PositionStatus = 'active' | 'won' | 'lost';
 
@@ -116,8 +115,8 @@ export const useTradingStore = create<TradingState>((set, get) => ({
   positions: [],
   trades: [],
   isExecutingTrade: false,
-  balance: 1000,
-  freeCollateral: 1000,
+  balance: 0,
+  freeCollateral: 0,
   stats: createEmptyStats(),
   notifications: [],
 
@@ -238,11 +237,8 @@ export const useTradingStore = create<TradingState>((set, get) => ({
 
           // Credit user balance
           if (pos.userId) {
-            try {
-              UserBalanceService.recordBetResult(pos.userId, pos.id, 'win', totalReturn);
-            } catch (error) {
-              console.error('Failed to update user balance:', error);
-            }
+            // Balance update is handled by server action settlePosition
+            console.log('Bet won, waiting for server settlement');
           }
 
           console.log('[TapTrading] Bet WON', {
@@ -271,11 +267,8 @@ export const useTradingStore = create<TradingState>((set, get) => ({
 
         // Record loss (no balance change, already deducted)
         if (pos.userId) {
-          try {
-            UserBalanceService.recordBetResult(pos.userId, pos.id, 'loss', 0);
-          } catch (error) {
-            console.error('Failed to update user balance:', error);
-          }
+           // Balance update is handled by server action settlePosition
+           console.log('Bet lost, waiting for server settlement');
         }
 
         console.log('[TapTrading] Bet LOST', {
@@ -309,8 +302,8 @@ export const useTradingStore = create<TradingState>((set, get) => ({
       positions: [],
       trades: [],
       isExecutingTrade: false,
-      balance: 1000,
-      freeCollateral: 1000,
+      balance: 0,
+      freeCollateral: 0,
       stats: createEmptyStats(),
       notifications: [],
       currentUserId: undefined,

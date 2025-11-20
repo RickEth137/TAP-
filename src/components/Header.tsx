@@ -10,9 +10,10 @@ interface HeaderProps {
   isDemoMode?: boolean;
   userBalance?: number;
   userWallet?: string;
+  isSystemReady?: boolean; // NEW: Show if Drift is ready
 }
 
-const Header: FC<HeaderProps> = ({ onManageBalance, onWithdrawClick, isDemoMode = false, userBalance, userWallet }) => {
+const Header: FC<HeaderProps> = ({ onManageBalance, onWithdrawClick, isDemoMode = false, userBalance, userWallet, isSystemReady = false }) => {
   const { stats, balance } = useTradingStore();
   const [mounted, setMounted] = useState(false);
 
@@ -21,10 +22,20 @@ const Header: FC<HeaderProps> = ({ onManageBalance, onWithdrawClick, isDemoMode 
   }, []);
 
   return (
-    <div className="absolute top-0 left-0 right-0 z-[60] p-4 bg-gradient-to-b from-black/90 to-transparent">
+    <div className="absolute top-0 left-0 right-0 z-[150] p-4 bg-gradient-to-b from-black/90 to-transparent">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
           <h1 className="text-2xl font-semibold tracking-[0.25em] text-white uppercase">Tap Trading</h1>
+          {!isSystemReady && (
+            <div className="px-3 py-1 rounded-full bg-red-500/20 border border-red-500/40 text-red-300 text-xs font-bold animate-pulse">
+              ⚠️ SYSTEM LOADING...
+            </div>
+          )}
+          {isSystemReady && (
+            <div className="px-3 py-1 rounded-full bg-green-500/20 border border-green-500/40 text-green-300 text-xs font-bold">
+              ✅ READY
+            </div>
+          )}
           {isDemoMode && (
             <div className="px-3 py-1 rounded-full bg-yellow-500/20 border border-yellow-500/40 text-yellow-300 text-xs font-bold animate-pulse">
               🎮 DEMO MODE
@@ -33,9 +44,13 @@ const Header: FC<HeaderProps> = ({ onManageBalance, onWithdrawClick, isDemoMode 
           {userWallet && userBalance !== undefined && (
             <button
               onClick={onManageBalance}
-              className="px-4 py-1 rounded-full border border-green-500/40 bg-green-500/10 text-green-300 text-sm font-bold hover:bg-green-500/20 transition-all"
+              className="group px-4 py-2 rounded-lg border border-green-500/40 bg-green-500/10 hover:bg-green-500/20 transition-all"
             >
-              💰 ${userBalance.toFixed(2)}
+              <div className="flex items-center gap-2">
+                <span className="text-green-400/70 text-xs font-medium">My Balance</span>
+                <span className="text-green-300 text-base font-bold">${userBalance.toFixed(2)}</span>
+                <span className="text-green-400/50 text-xs group-hover:text-green-300 transition-colors">+</span>
+              </div>
             </button>
           )}
           <div className="flex gap-3 text-xs text-white/70">

@@ -24,7 +24,9 @@ const PriceChart: FC<PriceChartProps> = ({ onGridTap }) => {
   const { priceHistory, currentPrice, positions } = useTradingStore();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const scrollPositionRef = useRef(0); // Horizontal scroll (time)
-  const verticalScrollRef = useRef(0); // Vertical scroll (price levels)
+  const priceOffsetRef = useRef(0); // Vertical scroll (price offset from baseline)
+  const targetPriceOffsetRef = useRef(0); // Target price offset for smoothing
+  const pricePerPixelRef = useRef(0); // Shared state for event handler
   const lastTimeRef = useRef(Date.now());
   const baselinePriceRef = useRef(0); // STABLE baseline for Y-axis
   const lastBaselineUpdateRef = useRef(0);
@@ -60,11 +62,38 @@ const PriceChart: FC<PriceChartProps> = ({ onGridTap }) => {
 
       const gridCellWidth = 80; // Width of each grid cell
       const gridCellHeight = rect.height / 10; // 10 rows
+
+      // ============== AUTO-SCALING LOGIC ==============
+      // Calculate min/max of visible history to maximize "action"
+      const pointsToShow = Math.min(priceHistory.length, 100); // Look at recent history
+      const recentHistory = priceHistory.slice(-pointsToShow);
       
-      // GRID TARGET RANGE: ±1% WIDE for meaningful betting distances
-      // Grid squares can be above/below visible Y-axis - that's OK!
-      const percentRange = 0.01; // ±1% for grid targets (NOT visual range!)
-      const percentStep = (percentRange * 2) / 10; // 0.2% per grid line
+      let minP = currentPrice;
+      let maxP = currentPrice;
+      
+      if (recentHistory.length > 0) {
+        minP = Math.min(currentPrice, ...recentHistory.map(p => p.price));
+        maxP = Math.max(currentPrice, ...recentHistory.map(p => p.price));
+      }
+      
+      // Calculate volatility-based range
+      const priceDiff = maxP - minP;
+      // Ensure we don't zoom in TOO much on flat lines (min 0.02% range)
+      const minRange = currentPrice * 0.0002; 
+      const targetRange = Math.max(priceDiff * 2.5, minRange); // Keep line in middle 40% of screen
+      
+      // Smoothly interpolate the visible range to prevent jumpy zooming
+      // We store the current range in a ref to animate it
+      if (!canvas.dataset.currentRange) {
+        canvas.dataset.currentRange = targetRange.toString();
+      }
+      
+      const currentRange = parseFloat(canvas.dataset.currentRange);
+      const smoothRange = currentRange + (targetRange - currentRange) * 0.05; // Smooth zoom
+      canvas.dataset.currentRange = smoothRange.toString();
+      
+      const visiblePriceRange = smoothRange;
+      const percentStep = visiblePriceRange / 10; // For grid lines
 
       // ============== SCROLLING LOGIC ==============
       const now = Date.now();
@@ -125,17 +154,22 @@ const PriceChart: FC<PriceChartProps> = ({ onGridTap }) => {
       // World space: each row represents a fixed percentage step
       // Baseline is the reference point (what price is at scroll position 0)
       const baseline = baselinePriceRef.current;
-      const verticalScroll = verticalScrollRef.current;
       
       // Calculate price range for visible viewport
       // Each gridCellHeight pixels = percentStep price change
       const pricePerPixel = (baseline * percentStep) / gridCellHeight;
+      pricePerPixelRef.current = pricePerPixel; // Update ref for event handler
+      
+      // Smooth scroll interpolation (Price Offset)
+      const scrollLerp = 0.1;
+      priceOffsetRef.current += (targetPriceOffsetRef.current - priceOffsetRef.current) * scrollLerp;
       
       // Center of viewport represents this price
-      const viewportCenterPrice = baseline - (verticalScroll * pricePerPixel);
+      // viewportCenterPrice = baseline - priceOffset
+      // (Positive offset = scrolling down = viewing lower prices)
+      const viewportCenterPrice = baseline - priceOffsetRef.current;
       
-      // Visible range is ±5 rows from center (10 total rows)
-      const visiblePriceRange = baseline * percentRange * 2; // ±1% = 2% total per 10 rows
+      // Visible range is determined by auto-scaling
       const minVisiblePrice = viewportCenterPrice - visiblePriceRange / 2;
       const maxVisiblePrice = viewportCenterPrice + visiblePriceRange / 2;
       
@@ -144,7 +178,8 @@ const PriceChart: FC<PriceChartProps> = ({ onGridTap }) => {
         // How far is this price from viewport center?
         const priceOffset = price - viewportCenterPrice;
         // Convert to pixels (negative because Y increases downward)
-        const pixelOffset = -(priceOffset / pricePerPixel);
+        // pricePerPixel = visiblePriceRange / rect.height
+        const pixelOffset = -(priceOffset / (visiblePriceRange / rect.height));
         // Center of screen + offset
         return rect.height / 2 + pixelOffset;
       };
@@ -164,11 +199,11 @@ const PriceChart: FC<PriceChartProps> = ({ onGridTap }) => {
         ctx.stroke();
         
         // Calculate price at this Y position
-        const rowCenterY = y;
-        // Convert Y back to price: inverse of priceToY
-        const pixelOffsetFromCenter = rowCenterY - rect.height / 2;
-        const priceOffsetFromCenter = -pixelOffsetFromCenter * pricePerPixel;
-        const priceAtY = viewportCenterPrice + priceOffsetFromCenter;
+      const rowCenterY = y;
+      // Convert Y back to price: inverse of priceToY
+      const pixelOffsetFromCenter = rowCenterY - rect.height / 2;
+      const priceOffsetFromCenter = -pixelOffsetFromCenter * (visiblePriceRange / rect.height);
+      const priceAtY = viewportCenterPrice + priceOffsetFromCenter;
         
         ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
         ctx.font = '11px monospace';
@@ -227,7 +262,7 @@ const PriceChart: FC<PriceChartProps> = ({ onGridTap }) => {
           // Calculate price at this row's Y position
           const y = (row + 0.5) * gridCellHeight;
           const pixelOffsetFromCenter = y - rect.height / 2;
-          const priceOffsetFromCenter = -pixelOffsetFromCenter * pricePerPixel;
+          const priceOffsetFromCenter = -pixelOffsetFromCenter * (visiblePriceRange / rect.height);
           const targetPrice = viewportCenterPrice + priceOffsetFromCenter;
           
           const leverage = calculateLeverage(currentPrice, targetPrice, secondsAhead, recentVolatility);
@@ -326,15 +361,23 @@ const PriceChart: FC<PriceChartProps> = ({ onGridTap }) => {
       // ============== DRAW SMOOTH PRICE LINE ==============
       
       if (priceHistory.length > 1) {
+        // Determine trend color
+        const startPrice = priceHistory[0].price;
+        const isUp = currentPrice >= startPrice;
+        
         const gradient = ctx.createLinearGradient(0, 0, presentX, 0);
-        gradient.addColorStop(0, 'rgba(168, 85, 247, 0.4)');
-        gradient.addColorStop(0.7, 'rgba(236, 72, 153, 0.7)');
-        gradient.addColorStop(1, '#ec4899');
+        if (isUp) {
+            gradient.addColorStop(0, 'rgba(34, 197, 94, 0.2)'); // Green start
+            gradient.addColorStop(1, '#22c55e'); // Green end
+        } else {
+            gradient.addColorStop(0, 'rgba(239, 68, 68, 0.2)'); // Red start
+            gradient.addColorStop(1, '#ef4444'); // Red end
+        }
         
         ctx.strokeStyle = gradient;
-        ctx.lineWidth = 3;
-        ctx.shadowBlur = 12;
-        ctx.shadowColor = 'rgba(236, 72, 153, 0.5)';
+        ctx.lineWidth = 4; // Thicker line
+        ctx.shadowBlur = 15;
+        ctx.shadowColor = isUp ? 'rgba(34, 197, 94, 0.5)' : 'rgba(239, 68, 68, 0.5)';
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
         ctx.beginPath();
@@ -377,9 +420,12 @@ const PriceChart: FC<PriceChartProps> = ({ onGridTap }) => {
       }
 
       // Draw current price HEAD (pulsing dot at NOW line)
-      ctx.fillStyle = '#ec4899';
-      ctx.shadowBlur = 20;
-      ctx.shadowColor = '#ec4899';
+      const isUp = priceHistory.length > 0 ? currentPrice >= priceHistory[Math.max(0, priceHistory.length - 5)].price : true;
+      const headColor = isUp ? '#22c55e' : '#ef4444';
+
+      ctx.fillStyle = headColor;
+      ctx.shadowBlur = 25;
+      ctx.shadowColor = headColor;
       ctx.beginPath();
       ctx.arc(presentX, currentY, 8, 0, Math.PI * 2);
       ctx.fill();
@@ -392,14 +438,14 @@ const PriceChart: FC<PriceChartProps> = ({ onGridTap }) => {
       ctx.fill();
 
       // Draw price label next to the head (show actual current price, not interpolated)
-      ctx.fillStyle = '#ec4899';
+      ctx.fillStyle = headColor;
       ctx.font = 'bold 14px monospace';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillText(`$${currentPrice.toFixed(2)}`, presentX + 15, currentY);
 
       // Draw horizontal line showing current price level across past zone
-      ctx.strokeStyle = 'rgba(236, 72, 153, 0.2)';
+      ctx.strokeStyle = isUp ? 'rgba(34, 197, 94, 0.3)' : 'rgba(239, 68, 68, 0.3)';
       ctx.lineWidth = 1;
       ctx.setLineDash([4, 4]);
       ctx.beginPath();
@@ -411,7 +457,7 @@ const PriceChart: FC<PriceChartProps> = ({ onGridTap }) => {
       // Helper function to convert price to Y coordinate (needed for won bet positioning)
       const priceToYForOverlay = (price: number) => {
         const priceOffset = price - viewportCenterPrice;
-        const pixelOffset = -(priceOffset / pricePerPixel);
+        const pixelOffset = -(priceOffset / (visiblePriceRange / rect.height));
         return rect.height / 2 + pixelOffset;
       };
 
@@ -456,7 +502,7 @@ const PriceChart: FC<PriceChartProps> = ({ onGridTap }) => {
     return () => {
       cancelAnimationFrame(animationFrameId);
     };
-  }, [priceHistory, currentPrice, positions]);
+  }, [priceHistory, currentPrice, positions, wonBetAnimations]);
 
   // Handle vertical scrolling with mouse wheel
   useEffect(() => {
@@ -466,10 +512,33 @@ const PriceChart: FC<PriceChartProps> = ({ onGridTap }) => {
 
     const handleWheel = (event: WheelEvent) => {
       event.preventDefault();
-      // Scroll vertically to access more price levels
-      const scrollAmount = event.deltaY * 0.5; // Adjust sensitivity
-      verticalScrollRef.current += scrollAmount;
-      // No limit - infinite scrolling!
+      
+      let deltaY = event.deltaY;
+      let sensitivity = 0;
+
+      // Adaptive sensitivity based on input device characteristics
+      if (event.deltaMode === 1) { 
+        // Line mode (Firefox/some mice) - definitely a mouse wheel
+        // Convert lines to pixels first (approx 40px per line)
+        deltaY *= 40; 
+        sensitivity = 0.01; // Very low sensitivity for line mode
+      } else if (Math.abs(deltaY) >= 50) {
+        // Large delta (likely a physical mouse wheel on Windows)
+        // Typical Windows mouse wheel is 100 per tick
+        // We want 1 tick to move just a small fraction of the screen
+        sensitivity = 0.02; // 100 * 0.02 = 2 pixels per tick (very smooth/slow)
+      } else {
+        // Small delta (likely a trackpad or high-precision mouse)
+        sensitivity = 0.5; // Keep responsive for trackpads
+      }
+      
+      const pixelScrollAmount = deltaY * sensitivity;
+      
+      // Convert pixel scroll to price scroll using CURRENT zoom level
+      const currentPricePerPixel = pricePerPixelRef.current || 0;
+      const priceScrollAmount = pixelScrollAmount * currentPricePerPixel;
+      
+      targetPriceOffsetRef.current += priceScrollAmount;
     };
 
     canvas.addEventListener('wheel', handleWheel, { passive: false });
@@ -483,7 +552,13 @@ const PriceChart: FC<PriceChartProps> = ({ onGridTap }) => {
     const canvas = canvasRef.current;
 
     const handleClick = (event: MouseEvent) => {
-      if (!currentPrice || currentPrice <= 0) return;
+      console.log('🖱️ Canvas clicked!', { x: event.clientX, y: event.clientY });
+      console.log('📊 PriceChart: Calling onGridTap handler...');
+      
+      if (!currentPrice || currentPrice <= 0) {
+        console.warn('⚠️ No current price available');
+        return;
+      }
 
       const rect = canvas.getBoundingClientRect();
       const x = event.clientX - rect.left;
@@ -501,16 +576,23 @@ const PriceChart: FC<PriceChartProps> = ({ onGridTap }) => {
       const pixelsPerSecond = futureWidth / timeRange;
       const scrollSpeed = pixelsPerSecond; // Grid scrolls at this speed
 
-      if (x <= presentX) return;
+      if (x <= presentX) {
+        console.log('❌ Clicked before NOW line');
+        return;
+      }
 
       // Find which grid row was clicked
       // Calculate price at clicked Y position using same world-space coordinate system
       const baseline = baselinePriceRef.current;
       if (!baseline) return;
       
-      const verticalScroll = verticalScrollRef.current;
-      const pricePerPixel = (baseline * percentStep) / rowHeight;
-      const viewportCenterPrice = baseline - (verticalScroll * pricePerPixel);
+      // Get current range from dataset (synced with render loop)
+      const currentRange = parseFloat(canvas.dataset.currentRange || '0');
+      if (!currentRange) return;
+
+      const priceOffset = priceOffsetRef.current;
+      const pricePerPixel = currentRange / rect.height;
+      const viewportCenterPrice = baseline - priceOffset;
       
       // Convert clicked Y to price
       const pixelOffsetFromCenter = y - rect.height / 2;
@@ -556,8 +638,17 @@ const PriceChart: FC<PriceChartProps> = ({ onGridTap }) => {
       const recentVolatility = computeRecentVolatility(recentPrices);
       const leverage = calculateLeverage(currentPrice, targetPrice, secondsAhead, recentVolatility);
 
+      console.log('✅ Bet placement triggered:', {
+        targetPrice: targetPrice.toFixed(2),
+        secondsAhead: secondsAhead.toFixed(1),
+        leverage: leverage.toFixed(1) + 'x',
+        gridColumn: clickedColIndex
+      });
+
+      console.log('🎯 PriceChart: Now calling page.tsx handleGridTap...');
       // gridRow not needed anymore - bets position by targetPrice
       onGridTap(targetPrice, expiryTime, leverage, secondsAhead, clickedColIndex, 0);
+      console.log('✅ PriceChart: onGridTap call completed');
     };
 
     canvas.addEventListener('click', handleClick);
@@ -570,7 +661,7 @@ const PriceChart: FC<PriceChartProps> = ({ onGridTap }) => {
     <div className="relative w-full h-full">
       <canvas
         ref={canvasRef}
-        className="w-full h-full"
+        className="w-full h-full cursor-crosshair"
         style={{ width: '100%', height: '100%' }}
       />
       
@@ -642,7 +733,8 @@ const PriceChart: FC<PriceChartProps> = ({ onGridTap }) => {
       <button
         onClick={() => {
           // Reset viewport to center on current price
-          verticalScrollRef.current = 0;
+          targetPriceOffsetRef.current = 0;
+          // priceOffsetRef.current will lerp to 0 automatically
           if (currentPrice > 0) {
             baselinePriceRef.current = currentPrice;
           }

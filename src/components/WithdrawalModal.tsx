@@ -2,7 +2,6 @@
 'use client';
 
 import React, { useState } from 'react';
-import UserBalanceService from '@/services/userBalanceService';
 
 interface WithdrawalModalProps {
   isOpen: boolean;

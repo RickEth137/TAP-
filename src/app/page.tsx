@@ -6,15 +6,13 @@ import { useTradingStore } from '@/store/tradingStore';
 import { MARKETS, DRIFT_CONFIG, TRADING_CONFIG } from '@/config/constants';
 import DriftService from '@/services/driftService';
 import PythWebSocketService from '@/services/pythWebSocketService';
-import UserBalanceService from '@/services/userBalanceService';
-import WithdrawalService from '@/services/withdrawalService';
-import PositionReconciliationService from '@/services/positionReconciliationService';
 import PriceChart from '@/components/PriceChart';
 import Header from '@/components/Header';
-import WalletModal from '@/components/WalletModal';
 import BettingPanel from '@/components/BettingPanel';
 import DepositModal from '@/components/DepositModal';
 import WithdrawalModal from '@/components/WithdrawalModal';
+import AdminDashboard from '@/components/AdminDashboard';
+import { getUserBalance, placeBet, requestWithdrawal, verifyDeposit, resolveBet } from '@/app/actions';
 
 let sharedPriceService: PythWebSocketService | null = null;
 let sharedPriceFeedUnsubscribe: (() => void) | null = null;
@@ -60,14 +58,13 @@ export default function Home() {
   }, [positions]);
 
   const driftServiceRef = useRef<DriftService | null>(null);
-  const withdrawalServiceRef = useRef<WithdrawalService | null>(null);
   const [isDriftAccountReady, setIsDriftAccountReady] = useState(false);
-  const [isCheckingAccount, setIsCheckingAccount] = useState(false);
-  const [showWalletModal, setShowWalletModal] = useState(false);
   const [betAmount, setBetAmount] = useState(10); // User-selected bet amount
   const [userBalance, setUserBalance] = useState(0); // User's app balance (tracked by wallet address)
   const [showDepositModal, setShowDepositModal] = useState(false);
   const [showWithdrawalModal, setShowWithdrawalModal] = useState(false);
+  const [showAdminDashboard, setShowAdminDashboard] = useState(false);
+  const [isSettling, setIsSettling] = useState(false); // Mutex for settlement
 
   // Initialize services
   useEffect(() => {
@@ -167,14 +164,15 @@ export default function Home() {
   useEffect(() => {
     if (wallet.publicKey) {
       const walletAddress = wallet.publicKey.toBase58();
-      const balance = UserBalanceService.getUserBalance(walletAddress);
-      setUserBalance(balance.balance);
-      console.log(`💰 User balance loaded: ${walletAddress} = $${balance.balance}`);
-      
-      // Show deposit modal if balance is 0
-      if (balance.balance === 0) {
-        setShowDepositModal(true);
-      }
+      getUserBalance(walletAddress).then((data) => {
+        setUserBalance(data.balance);
+        console.log(`💰 User balance loaded: ${walletAddress} = $${data.balance}`);
+        
+        // Show deposit modal if balance is 0
+        if (data.balance === 0) {
+          setShowDepositModal(true);
+        }
+      });
     } else {
       setUserBalance(0);
     }
@@ -184,8 +182,9 @@ export default function Home() {
   useEffect(() => {
     if (!wallet.publicKey) return;
     const walletAddress = wallet.publicKey.toBase58();
-    const balance = UserBalanceService.getUserBalance(walletAddress);
-    setUserBalance(balance.balance);
+    getUserBalance(walletAddress).then((data) => {
+      setUserBalance(data.balance);
+    });
   }, [positions, wallet.publicKey]);
 
   // CRITICAL: Settle positions on blockchain when they resolve
@@ -193,35 +192,58 @@ export default function Home() {
     if (!isDriftAccountReady || !driftServiceRef.current) return;
 
     const settlePositions = async () => {
+      // Mutex: prevent concurrent settlements
+      if (isSettling) {
+        console.log('⏳ Settlement already in progress, skipping...');
+        return;
+      }
+
       const needsSettlement = positions.filter(
         (pos) => 
           (pos.status === 'won' || pos.status === 'lost') && 
           !pos.settledOnChain &&
           pos.txSignature && // Only settle if real trade was placed
-          (pos.settlementAttempts || 0) < 3 // Max 3 retry attempts
+          (pos.settlementAttempts || 0) < 5 // Max 5 retry attempts (increased)
       );
 
       if (needsSettlement.length === 0) return;
+
+      setIsSettling(true); // Acquire mutex
 
       console.log(`🔄 Settling ${needsSettlement.length} positions on blockchain...`);
 
       // Process sequentially to avoid race conditions
       for (const pos of needsSettlement) {
         try {
-          console.log(`📤 Closing position ${pos.id} on Drift...`);
+          console.log(`📤 Resolving bet ${pos.id} on server...`);
           
-          const settleTxSig = await driftServiceRef.current!.closePosition(
-            pos.marketIndex,
-            pos.direction.toLowerCase() as 'long' | 'short'
+          if (!pos.userId) {
+             throw new Error('Position missing userId');
+          }
+
+          const result = await resolveBet(
+            pos.userId,
+            pos.id,
+            pos.realizedPnL || 0,
+            pos.status === 'won'
           );
+
+          if (!result.success) {
+             throw new Error(result.error || 'Settlement failed');
+          }
+          
+          // For resolveBet, we don't get a txSignature back necessarily (unless we want to track the close tx)
+          // But let's assume success means it's done.
+          // We can use a placeholder or the original txSig if we want to keep the field populated.
+          const settleTxSig = 'server-resolved'; 
 
           updatePosition(pos.id, {
             settledOnChain: true,
             settlementTxSignature: settleTxSig,
           });
 
-          console.log(`✅ Position ${pos.id} settled on chain:`, settleTxSig);
-          addNotification('success', `Position settled: ${pos.status === 'won' ? 'WIN' : 'LOSS'}`);
+          console.log(`✅ Position ${pos.id} resolved. Balance updated.`);
+          addNotification('success', `Payout processed: ${pos.status === 'won' ? 'WIN' : 'LOSS'}`);
         } catch (error: any) {
           console.error(`❌ Failed to settle position ${pos.id}:`, error);
           
@@ -237,36 +259,47 @@ export default function Home() {
         }
 
         // Small delay between settlements to avoid rate limits
-        await new Promise(resolve => setTimeout(resolve, 500));
+        await new Promise((resolve) => setTimeout(resolve, 500));
       }
+
+      setIsSettling(false); // Release mutex
     };
 
-    settlePositions();
-  }, [positions, isDriftAccountReady, updatePosition, addNotification]);
+    settlePositions().catch((error) => {
+      console.error('❌ Settlement process failed:', error);
+      setIsSettling(false); // Release mutex on error
+    });
+  }, [positions, isDriftAccountReady, updatePosition, addNotification, isSettling]);
 
   // Initialize Drift with universal account (no wallet needed)
   useEffect(() => {
     const initDrift = async () => {
+      console.log('🚀 ========== DRIFT INITIALIZATION START ==========');
+      console.log('📋 Environment Check:');
+      console.log('   RPC_URL:', DRIFT_CONFIG.RPC_URL ? '✅ Set' : '❌ Missing');
+      console.log('   RPC_URL value:', DRIFT_CONFIG.RPC_URL);
+      console.log('   UNIVERSAL_WALLET_ADDRESS:', process.env.NEXT_PUBLIC_UNIVERSAL_WALLET_ADDRESS ? '✅ Set' : '❌ Missing');
+      console.log('   UNIVERSAL_WALLET_PRIVATE_KEY:', process.env.NEXT_PUBLIC_UNIVERSAL_WALLET_PRIVATE_KEY ? '✅ Set' : '❌ Missing');
+      console.log('   DRIFT_ACCOUNT_PRIVATE_KEY:', process.env.DRIFT_UNIVERSAL_ACCOUNT_PRIVATE_KEY ? '✅ Set' : '❌ Missing');
+      console.log('   DRIFT_ACCOUNT_PRIVATE_KEY length:', process.env.DRIFT_UNIVERSAL_ACCOUNT_PRIVATE_KEY?.length);
+      
       try {
-        setIsCheckingAccount(true);
+        console.log('1️⃣ Creating DriftService instance...');
         driftServiceRef.current = new DriftService(DRIFT_CONFIG.RPC_URL);
-        
-        // Initialize withdrawal service
-        withdrawalServiceRef.current = new WithdrawalService(DRIFT_CONFIG.RPC_URL);
-        const privateKeyStr = process.env.NEXT_PUBLIC_UNIVERSAL_WALLET_PRIVATE_KEY;
-        if (privateKeyStr) {
-          const privateKeyArray = JSON.parse(privateKeyStr);
-          withdrawalServiceRef.current.initialize(privateKeyArray);
-          console.log('✅ Withdrawal service initialized');
-        }
+        console.log('✅ DriftService created');
         
         // Initialize with universal account (no wallet parameter needed)
+        console.log('4️⃣ Calling driftService.initializeClient()...');
+        console.log('   This will connect to Drift Protocol and set up the universal account');
         await driftServiceRef.current.initializeClient();
         console.log('✅ Universal Drift account initialized');
         
         // Universal account is always ready
+        console.log('5️⃣ Setting isDriftAccountReady to true...');
         setIsDriftAccountReady(true);
-        addNotification('success', 'Ready to trade!');
+        addNotification('success', '✅ Trading system ready! You can now place bets.');
+        console.log('✅ System ready - you can now click the grid to place bets');
+        console.log('🎯 ========== DRIFT INITIALIZATION COMPLETE ==========');
         
         // Fetch account balance
         try {
@@ -275,63 +308,85 @@ export default function Home() {
           setFreeCollateral(accountInfo.freeCollateral);
           console.log('Universal account balance:', accountInfo.totalCollateral);
           
-          // Run position reconciliation check
-          console.log('🔍 Running position reconciliation...');
-          const reconciliation = await PositionReconciliationService.reconcile(
-            driftServiceRef.current
-          );
-          
-          if (reconciliation.orphanedDriftPositions > 0) {
-            console.warn('⚠️ Found orphaned positions on Drift account');
-            console.log(PositionReconciliationService.formatRecommendations(reconciliation));
-            
-            // Auto-close orphaned positions
-            const cleanup = await PositionReconciliationService.closeOrphanedPositions(
-              driftServiceRef.current,
-              reconciliation.driftPositions.filter((pos) => {
-                const key = `${pos.marketIndex}-${pos.direction}`;
-                const isTracked = positions.some(
-                  (appPos) => 
-                    `${appPos.marketIndex}-${appPos.direction.toLowerCase()}` === key &&
-                    (appPos.status === 'active' || !appPos.settledOnChain)
-                );
-                return !isTracked;
-              })
-            );
-            
-            if (cleanup.closed > 0) {
-              addNotification('success', `Cleaned up ${cleanup.closed} orphaned positions`);
-            }
-            if (cleanup.failed > 0) {
-              addNotification('error', `Failed to close ${cleanup.failed} positions`);
-            }
-          } else {
-            console.log('✅ All positions properly tracked');
-          }
         } catch (error) {
           console.warn('Could not fetch account info:', error);
-          // Use demo balance if universal account not configured
-          setBalance(1000);
-          setFreeCollateral(1000);
+          setBalance(0);
+          setFreeCollateral(0);
         }
       } catch (error: any) {
-        console.error('Drift initialization failed:', error);
+        console.error('❌❌❌ DRIFT INITIALIZATION FAILED ❌❌❌');
+        console.error('🔴 Full error:', error);
+        console.error('🔴 Error message:', error?.message);
+        console.error('🔴 Error stack:', error?.stack);
+        
+        // Detailed diagnostics
+        console.log('');
+        console.log('🔍 DIAGNOSTICS:');
+        console.log('   isDriftAccountReady before error:', isDriftAccountReady);
+        console.log('   driftServiceRef.current:', !!driftServiceRef.current);
         
         // Check if it's the missing config error
         if (error?.message?.includes('not configured')) {
-          console.log('💡 To enable live trading, set up the universal account:');
-          console.log('   See UNIVERSAL_ACCOUNT_SETUP.md for instructions');
-          setIsDriftAccountReady(false); // Demo mode
+          console.error('');
+          console.error('💡 PROBLEM IDENTIFIED: Universal account not configured');
+          console.error('   Missing environment variables in .env.local:');
+          console.error('   - NEXT_PUBLIC_UNIVERSAL_WALLET_PRIVATE_KEY');
+          console.error('   - DRIFT_UNIVERSAL_ACCOUNT_PRIVATE_KEY');
+          console.error('');
+          console.error('📝 TO FIX:');
+          console.error('   1. Check .env.local file exists');
+          console.error('   2. Verify both keys are set');
+          console.error('   3. Restart dev server: npm run dev');
+          addNotification('error', '❌ Wallet not configured. Check console (F12).');
+          setIsDriftAccountReady(false);
+        } else if (error?.message?.includes('Invalid') || error?.message?.includes('format')) {
+          console.error('');
+          console.error('💡 PROBLEM IDENTIFIED: Invalid private key format');
+          console.error('   Your private key must be a JSON array: [1,2,3,...]');
+          console.error('');
+          console.error('📝 TO FIX:');
+          console.error('   1. Run: solana-keygen show /path/to/keypair.json --output json-compact');
+          console.error('   2. Copy the array and paste into .env.local');
+          console.error('   3. Restart dev server');
+          addNotification('error', '❌ Invalid key format. Check console (F12).');
+          setIsDriftAccountReady(false);
+        } else if (error?.message?.includes('account does not exist') || error?.message?.includes('Account not found')) {
+          console.error('');
+          console.error('💡 PROBLEM IDENTIFIED: Drift account not initialized');
+          console.error('   Your universal wallet needs a Drift account');
+          console.error('');
+          console.error('📝 TO FIX:');
+          console.error('   1. Visit https://app.drift.trade/');
+          console.error('   2. Import your universal wallet');
+          console.error('   3. Click "Initialize Account" (~0.035 SOL)');
+          console.error('   4. Refresh this page');
+          addNotification('error', '❌ Drift account not initialized. Check console (F12).');
+          setIsDriftAccountReady(false);
         } else {
-          console.error('Drift initialization failed - check console for details');
+          console.error('');
+          console.error('💡 PROBLEM IDENTIFIED: Unknown error');
+          console.error('   Possible causes:');
+          console.error('   - RPC endpoint down or invalid');
+          console.error('   - Network connection issues');
+          console.error('   - Universal wallet has no SOL for gas');
+          console.error('');
+          console.error('📝 TO FIX:');
+          console.error('   1. Check RPC endpoint is working');
+          console.error('   2. Verify universal wallet has SOL (~0.5 SOL)');
+          console.error('   3. Check browser console for network errors');
+          addNotification('error', '❌ System initialization failed. Check console (F12).');
           setIsDriftAccountReady(false);
         }
         
-        // Always provide demo balance for testing
-        setBalance(1000);
-        setFreeCollateral(1000);
-      } finally {
-        setIsCheckingAccount(false);
+        console.log('');
+        console.log('🚨 RESULT: Trading is DISABLED until this is fixed');
+        console.log('   isDriftAccountReady is now FALSE');
+        console.log('   Grid clicks will be blocked');
+        console.log('');
+        
+        // No demo balance - real money only
+        setBalance(0);
+        setFreeCollateral(0);
       }
     };
 
@@ -436,26 +491,6 @@ export default function Home() {
 
   // Passive expiry checks now handled by hasActivePositions watcher above
 
-  // Create Drift account handler
-  const handleCreateDriftAccount = async () => {
-    if (!driftServiceRef.current) return;
-    
-    try {
-      setIsCheckingAccount(true);
-      await driftServiceRef.current.initializeUserAccount();
-      setIsDriftAccountReady(true);
-      const accountInfo = await driftServiceRef.current.getUserAccount();
-      setBalance(accountInfo.totalCollateral);
-      setFreeCollateral(accountInfo.freeCollateral);
-      addNotification('success', 'Drift account created successfully!');
-    } catch (error: any) {
-      console.error('Failed to create account:', error);
-      addNotification('error', `Failed to create account: ${error.message}`);
-    } finally {
-      setIsCheckingAccount(false);
-    }
-  };
-
   // Handle grid tap - place bet at target price AND time
   const handleGridTap = useCallback(
     async (
@@ -466,22 +501,29 @@ export default function Home() {
       gridColumn: number,
       gridRow: number, // Store grid row to lock bet to cell
     ) => {
+      console.log('🎯 ========== GRID CLICK HANDLER START ==========');
+      console.log('📍 handleGridTap called:', { targetPrice, leverage, timeSlotSeconds });
+      
       // Check if wallet is connected
       if (!wallet.publicKey) {
-        addNotification('error', 'Connect wallet to place bets!');
-        setShowWalletModal(true);
+        console.error('❌ BLOCKED: Wallet not connected');
+        addNotification('error', '🔴 WALLET NOT CONNECTED! Click "CONNECT" button in top right corner first!');
         return;
       }
+      console.log('✅ Wallet connected:', wallet.publicKey.toBase58());
 
       const walletAddress = wallet.publicKey.toBase58();
       
       // Check user balance
-      const userBalanceData = UserBalanceService.getUserBalance(walletAddress);
+      const userBalanceData = await getUserBalance(walletAddress);
+      
       if (userBalanceData.balance < betAmount) {
+        console.error('❌ BLOCKED: Insufficient balance');
         addNotification('error', `Insufficient balance! You have $${userBalanceData.balance.toFixed(2)}`);
         setShowDepositModal(true);
         return;
       }
+      console.log('✅ Balance check passed');
       
       const currentPrice = useTradingStore.getState().currentPrice;
       if (!currentPrice || currentPrice <= 0) {
@@ -497,11 +539,8 @@ export default function Home() {
         addNotification('error', `Bet too close! Need ${TRADING_CONFIG.MIN_BET_TIME_SECONDS}s minimum`);
         return;
       }
-      const createdAt = Date.now();
-      const positionId = `bet-${createdAt}`;
       
       // Zone should match the VISUAL grid cell height (0.2% per row, 10 rows = 2% total range)
-      // Each grid cell = 0.2% of price range
       const gridCellPercent = 0.002; // 0.2% per grid cell
       const zoneHalfWidth = targetPrice * (gridCellPercent / 2); // Half cell height
       const zoneLowerBound = targetPrice - zoneHalfWidth;
@@ -512,67 +551,32 @@ export default function Home() {
       const priceChangePercent = Math.abs(targetPrice - currentPrice) / currentPrice;
       const expectedProfit = positionSize * priceChangePercent;
 
-      console.log(`
-    Placing prediction bet:
-       User: ${walletAddress}
-       Collateral: $${betAmount}
-       User Balance: $${userBalanceData.balance}
-       Leverage: ${leverage}x
-       Position Size: $${positionSize.toFixed(2)}
-   
-       Current Price: $${currentPrice.toFixed(2)}
-      Target Price: $${targetPrice.toFixed(2)}
-      Win Zone: $${zoneLowerBound.toFixed(2)} - $${zoneUpperBound.toFixed(2)} (±${(gridCellPercent * 50).toFixed(1)}%)
-       Time Limit: +${expirySeconds.toFixed(0)}s
-   
-       Expected Profit if Correct: $${expectedProfit.toFixed(2)}
-       Total if WIN: $${(betAmount + expectedProfit).toFixed(2)}
-   
-       WIN if: Price line crosses through bet square
-       LOSS if: Timer expires before price hits square (-$${betAmount} collateral)
-    `);
-
       setExecutingTrade(true);
 
       try {
-        // Deduct bet amount from user balance
-        UserBalanceService.recordBet(walletAddress, positionId, betAmount);
-        setUserBalance(userBalanceData.balance - betAmount);
+        console.log('🔥 Executing REAL trade via Server Action...');
         
-        // Default to demo mode
-        let txSignature = 'demo-' + Date.now();
-        let entryOrderId, takeProfitOrderId, stopLossOrderId;
-        let isRealTrade = false;
-        
-        // Only execute on Drift if account is ready
-        if (driftServiceRef.current && isDriftAccountReady) {
-          try {
-            console.log('🔥 Executing LIVE trade on Drift Protocol...');
-            const result = await driftServiceRef.current.executeTapTrade(
-              direction,
-              targetPrice,
-              betAmount,
-              leverage,
-              MARKETS.SOL
-            );
-            txSignature = result.txSignature;
-            entryOrderId = result.entryOrderId;
-            takeProfitOrderId = result.takeProfitOrderId;
-            stopLossOrderId = result.stopLossOrderId;
-            isRealTrade = true;
-            addNotification('success', `Live bet placed! $${betAmount} @ ${leverage}x`);
-          } catch (error) {
-            console.warn('Drift execution failed, using demo mode:', error);
-          }
-        } else {
-          // Demo mode - silent
-          console.log('🎮 Demo bet placed (no real trade)');
+        const result = await placeBet(
+            walletAddress,
+            betAmount,
+            targetPrice,
+            leverage,
+            direction
+        );
+
+        if (!result.success || !result.txSignature || !result.betId) {
+            throw new Error(result.error || 'Trade failed');
         }
+
+        addNotification('success', `Bet placed! $${betAmount} @ ${leverage}x`);
+        
+        // Update local balance
+        setUserBalance(prev => prev - betAmount);
 
         // Add active bet to positions
         addPosition({
-          id: positionId,
-          userId: walletAddress, // Track which user owns this bet
+          id: result.betId,
+          userId: walletAddress,
           marketIndex: MARKETS.SOL.marketIndex,
           direction: direction.toUpperCase() as 'LONG' | 'SHORT',
           entryPrice: currentPrice,
@@ -580,56 +584,57 @@ export default function Home() {
           zoneLowerBound,
           zoneUpperBound,
           expiryTime,
-          stopLossPrice: currentPrice * 0.95, // Not really used in this system
-          size: positionSize, // Real position size from leverage
+          stopLossPrice: currentPrice * 0.95,
+          size: positionSize,
           betAmount,
-          multiplier: leverage, // Store leverage in multiplier field for compatibility
+          multiplier: leverage,
           timeOffsetSeconds: timeSlotSeconds,
-          timestamp: createdAt,
+          timestamp: Date.now(),
           status: 'active',
-          txSignature,
-          entryOrderId,
-          takeProfitOrderId,
-          stopLossOrderId,
-          gridColumn, // Store grid column to fix rendering position
-          gridRow, // Store grid row to lock bet to cell
+          txSignature: result.txSignature,
+          gridColumn,
+          gridRow,
         });
 
-        console.log('[TapTrading] Position created', {
-          id: positionId,
-          expiresAt: new Date(expiryTime).toISOString(),
-          direction,
-          leverage,
-          betAmount,
-          size: positionSize,
-          createdAt: new Date(createdAt).toISOString(),
-          gridColumn: gridColumn,
-          gridRow: gridRow,
-          targetPrice: targetPrice.toFixed(2),
-          currentPrice: currentPrice.toFixed(2),
-        });
-        console.log(`✅ Bet placed at gridColumn ${gridColumn}, gridRow ${gridRow}. Win if price lands in zone when timer expires at ${new Date(expiryTime).toLocaleTimeString()}`);
+        console.log(`✅ Bet placed successfully: ${result.txSignature}`);
       } catch (error: any) {
         console.error('Bet placement failed:', error);
-        alert(`Failed to place bet: ${error.message || 'Unknown error'}`);
+        addNotification('error', `Failed to place bet: ${error.message || 'Unknown error'}`);
       } finally {
         setExecutingTrade(false);
       }
     },
-    [addPosition, setExecutingTrade, isDriftAccountReady, addNotification, betAmount]
+    [addPosition, setExecutingTrade, addNotification, betAmount, wallet.publicKey]
   );
 
   return (
     <main className="relative w-screen h-screen overflow-hidden text-white">
       <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/90 via-black/70 to-black" aria-hidden="true" />
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(255,255,255,0.04),transparent_45%)]" aria-hidden="true" />
+      
+      {/* MASSIVE WARNING OVERLAY - WALLET NOT CONNECTED */}
+      {!wallet.publicKey && (
+        <div className="absolute inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm pointer-events-auto cursor-not-allowed">
+          <div className="text-center space-y-4 animate-pulse pointer-events-none">
+            <div className="text-8xl mb-8">⚠️</div>
+            <h1 className="text-6xl font-bold text-red-500">WALLET NOT CONNECTED!</h1>
+            <p className="text-3xl text-white">Click the &quot;CONNECT&quot; button in the top right corner</p>
+            <div className="text-2xl text-gray-400 mt-8">👆 Look for the purple button that says &quot;CONNECT&quot;</div>
+            <div className="text-xl text-yellow-400 mt-12 animate-bounce">
+              ⬆️ THE BUTTON IS ABOVE THIS MESSAGE ⬆️
+            </div>
+          </div>
+        </div>
+      )}
+      
       {/* Header with wallet & stats */}
       <Header 
         onManageBalance={() => setShowDepositModal(true)} 
         onWithdrawClick={() => setShowWithdrawalModal(true)}
-        isDemoMode={!isDriftAccountReady}
+        isDemoMode={false}
         userBalance={userBalance}
         userWallet={wallet.publicKey?.toBase58()}
+        isSystemReady={isDriftAccountReady}
       />
 
       {/* Main content strip */}
@@ -661,6 +666,15 @@ export default function Home() {
         })}
       </div>
 
+      {/* Admin Dashboard Button (top-right corner) */}
+      <button
+        onClick={() => setShowAdminDashboard(true)}
+        className="absolute top-4 right-4 z-50 px-4 py-2 bg-purple-600/20 hover:bg-purple-600/30 border border-purple-500/40 rounded-lg text-purple-300 text-sm font-semibold transition-all pointer-events-auto"
+        title="Admin Dashboard"
+      >
+        📊 Admin
+      </button>
+
       {/* Deposit Modal */}
       <DepositModal
         isOpen={showDepositModal}
@@ -678,17 +692,17 @@ export default function Home() {
         userWallet={wallet.publicKey?.toBase58() || ''}
         currentBalance={userBalance}
         onWithdrawalRequest={async (amount: number) => {
-          if (!wallet.publicKey || !withdrawalServiceRef.current) {
+          if (!wallet.publicKey) {
             throw new Error('Wallet not connected');
           }
           
-          const result = await withdrawalServiceRef.current.processWithdrawal(
+          const result = await requestWithdrawal(
             wallet.publicKey.toBase58(),
             amount
           );
           
           if (result.success) {
-            const updatedBalance = UserBalanceService.getUserBalance(wallet.publicKey.toBase58());
+            const updatedBalance = await getUserBalance(wallet.publicKey.toBase58());
             setUserBalance(updatedBalance.balance);
             addNotification('success', `Withdrawal successful! TX: ${result.txSignature?.substring(0, 8)}...`);
           } else {
@@ -697,33 +711,15 @@ export default function Home() {
         }}
       />
 
-      {/* Wallet Management Modal */}
-      <WalletModal
-        isOpen={showWalletModal}
-        onClose={() => setShowWalletModal(false)}
-        driftService={driftServiceRef.current}
-        isDriftAccountReady={isDriftAccountReady}
-        isCheckingAccount={isCheckingAccount}
-        onCreateAccount={handleCreateDriftAccount}
-        freeCollateral={freeCollateral}
-      />
+      {/* Note: Users don't need individual Drift accounts - the universal account handles all trades */}
 
-      {/* Initialization status */}
-      {isCheckingAccount && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black/70 backdrop-blur-sm z-40">
-          <div className="bg-black/80 border border-white/10 rounded-2xl p-8 text-center max-w-md shadow-2xl shadow-black">
-            <h2 className="text-2xl font-semibold text-white mb-4">
-              Tap Trading
-            </h2>
-            <p className="text-white/70 mb-6">
-              Initializing...
-            </p>
-            <p className="text-sm text-white/40">
-              Please wait...
-            </p>
-          </div>
-        </div>
-      )}
+      {/* Admin Dashboard */}
+      <AdminDashboard
+        isOpen={showAdminDashboard}
+        onClose={() => setShowAdminDashboard(false)}
+        driftBalance={balance}
+        driftFreeCollateral={freeCollateral}
+      />
     </main>
   );
 }

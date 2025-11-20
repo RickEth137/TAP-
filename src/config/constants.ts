@@ -2,8 +2,8 @@
 export const DRIFT_CONFIG = {
   // Use mainnet-beta for production, devnet for testing
   ENV: process.env.NEXT_PUBLIC_SOLANA_ENV || 'mainnet-beta',
-  // Using Alchemy free RPC - for production, get your own key from: https://www.alchemy.com/solana
-  RPC_URL: process.env.NEXT_PUBLIC_RPC_URL || 'https://solana-mainnet.g.alchemy.com/v2/demo',
+  // STRICT: Must use paid RPC endpoint from environment variables
+  RPC_URL: process.env.NEXT_PUBLIC_RPC_URL!,
   // Drift Program ID (mainnet)
   DRIFT_PROGRAM_ID: 'dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH',
   // Universal Drift Account - ONE account for ALL users

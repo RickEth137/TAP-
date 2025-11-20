@@ -1,0 +1,28 @@
+{
+  "users": {
+    "AwKkSwLykXo1e8H4sA3ZZhHXWGH5w1Jkt5eVTt7rresB": {
+      "walletAddress": "AwKkSwLykXo1e8H4sA3ZZhHXWGH5w1Jkt5eVTt7rresB",
+      "balance": 0,
+      "totalDeposits": 0,
+      "totalWithdrawals": 0,
+      "totalBets": 0,
+      "totalWinnings": 0,
+      "deposits": [],
+      "withdrawals": [],
+      "bets": [],
+      "lastUpdated": 1763609285722
+    },
+    "7cdnaCbmtnqyBuDmaNoqF91U7w3tkGHceHVk6kz4bg7G": {
+      "walletAddress": "7cdnaCbmtnqyBuDmaNoqF91U7w3tkGHceHVk6kz4bg7G",
+      "balance": 0,
+      "totalDeposits": 0,
+      "totalWithdrawals": 0,
+      "totalBets": 0,
+      "totalWinnings": 0,
+      "deposits": [],
+      "withdrawals": [],
+      "bets": [],
+      "lastUpdated": 1763611544077
+    }
+  }
+}
